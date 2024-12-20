@@ -1,0 +1,610 @@
+---
+title: "5_social_buffering_stb"
+author: "Paul A. Bloom"
+date: "2023-12-12"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Setup
+
+```{r}
+library(Matrix)
+library(tidyverse)
+library(lme4)
+library(lmerTest)
+library(sjPlot)
+library(metafor)
+library(brms)
+library(survival)
+library(ranger)
+library(ggfortify)
+library(pscl)
+load('../cleaned_data/cleaned_data_for_stress_social_context_project_2024-12-16.rda')
+
+```
+
+```{r}
+load('/Volumes/columbia/MAPS_Data/Analysis/Wrangling/STB_Risk/suicide_events_2024-10-23.rda')
+
+
+selfreport = mutate(selfreport, Control = GROUP == 'Control')
+
+
+# update events based on Karla's updates fall 2024
+suicide_events_clean = dplyr::mutate(suicide_events_clean, start_date = if_else(start_date == '#####' &
+                                                                                         event == 'attempt' & 
+                                                                                         ptid == '#####', 
+                                                                                       as.Date('#####'), as.Date(start_date)),
+                                     end_date = if_else(end_date == '#####' &
+                                                                                         event == 'attempt' & 
+                                                                                         ptid == '#####', 
+                                                                                       as.Date('#####'), as.Date(end_date)),
+                                     start_date_week_wednesday = if_else(start_date_week_wednesday == '#####' &
+                                                                                         event == 'attempt' & 
+                                                                                         ptid == '#####', 
+                                                                                       as.Date('#####'), as.Date(start_date_week_wednesday)))
+
+
+suicide_events_clean = dplyr::mutate(suicide_events_clean, start_date = if_else(start_date == '#####' &
+                                                                                         event == 'attempt' & 
+                                                                                         ptid == '#####', 
+                                                                                       as.Date('#####'), as.Date(start_date)),
+                                     end_date = if_else(end_date == '#####' &
+                                                                                         event == 'attempt' & 
+                                                                                         ptid == '#####', 
+                                                                                       as.Date('#####'), as.Date(end_date)))
+
+suicide_events_info_report = dplyr::filter(suicide_events_clean, ptid %in% ema_data$ID)
+
+sum_suicide_events_participant = suicide_events_clean %>% group_by(ptid) %>% count()
+
+
+# unique participants
+length(unique(suicide_events_info_report$ptid))
+
+# total events
+nrow(suicide_events_info_report)
+
+# table 
+table(suicide_events_info_report$event)
+
+# unique weeks
+suicide_events_info_weekly_report = dplyr::filter(suicide_events_clean_weekly, ptid %in% ema_data$ID)
+
+# 33 unique weeks (4 instances )
+nrow(suicide_events_info_weekly_report)
+
+
+```
+
+
+# Run level-1 GLMS to get a "social buffering" metric for each participant
+```{r}
+ema_data_for_buffer = dplyr::filter(ema_data, Nalone > 0, Npeer > 0, Nfamily > 0, Nresp >= 5) %>%
+    group_by(ID) %>%
+    mutate(stress_variance = var(stressed)) %>%
+    ungroup() %>%
+    dplyr::filter(stress_variance > 0)
+
+
+length(unique(ema_data_for_buffer$ID))
+length(unique(ema_data$ID))
+
+
+nested_buffer_models = ema_data_for_buffer %>%
+    group_by(ID) %>%
+    mutate(stress_within_z = scale(stressed, scale = TRUE, center = TRUE),
+           n=n()) %>%
+    group_by(ID, n) %>%
+    nest() %>%
+    dplyr::mutate(stress_buffer_level1_model = map(data, ~lm(data=., stress_within_z ~ alone + hour + personal_time)))
+
+
+nested_buffer_coef = nested_buffer_models %>%
+    dplyr::mutate(coef = map(stress_buffer_level1_model, ~broom::tidy(.)))
+
+
+stress_buffer_scores = nested_buffer_coef %>%
+    unnest(coef) %>%
+    dplyr::select(-stress_buffer_level1_model, -data) %>%
+    dplyr::filter(term == 'alone1') %>%
+    dplyr::select(ID, stress_buffer_est = estimate, stress_buffer_sd = std.error, n) %>%
+    mutate(stress_buffer_se = stress_buffer_sd/sqrt(n))
+
+
+stress_buffer_selfreport = left_join(selfreport, stress_buffer_scores, by = 'ID')
+
+
+length(unique(stress_buffer_scores$ID))
+
+```
+
+# Does stress buffering predict which participants will have suicide events?
+```{r}
+stress_buffer_glm_level2 = glm(data = stress_buffer_selfreport, participant_suicide_event1 ~ stress_buffer_est + GROUP + sex + SITE + age + iPhone, weights = 1/stress_buffer_sd,
+                               family = binomial(link = 'logit'))
+
+stress_buffer_glm_level2_si = glm(data = stress_buffer_selfreport, participant_suicide_event1 ~ stress_buffer_est + SSI21_i + sex + SITE + age + iPhone, weights = 1/stress_buffer_sd,
+                               family = binomial(link = 'logit'))
+
+
+summary(stress_buffer_glm_level2)
+summary(stress_buffer_glm_level2_si)
+
+```
+
+
+# Does stress predict which participants will have suicide events?
+```{r}
+btw_summary_data = ema_data %>%
+  mutate(alone = as.numeric(as.character(alone)),
+         Wpeers = as.numeric(as.character(Wpeers))) %>%
+  group_by(ID) %>%
+  summarise(
+         baseline_mean_stress = mean(stressed[personal_time < 8], na.rm=TRUE),
+         mean_stress = mean(stressed, na.rm=TRUE),
+         baseline_mean_na = mean(mean_na[personal_time < 8], na.rm = TRUE),
+         baseline_mean_pa = mean(mean_pa[personal_time < 8], na.rm = TRUE),
+         mean_na = mean(mean_na, na.rm = TRUE),
+         mean_pa = mean(mean_pa, na.rm = TRUE),
+         mean_stress_alone = mean(stressed[alone ==1], na.rm=TRUE),
+         mean_stress_family = mean(stressed[Wfamily==1], na.rm=TRUE),
+         mean_stress_peers = mean(stressed[Wpeers==1], na.rm=TRUE),
+         baseline_mean_stress_alone = mean(stressed[personal_time < 8 & alone ==1], na.rm=TRUE),
+         baseline_mean_stress_family = mean(stressed[personal_time < 8 & Wfamily==1], na.rm=TRUE),
+         baseline_mean_stress_peers = mean(stressed[personal_time < 8 & Wpeers==1], na.rm=TRUE),
+         baseline_sd_stress = sd(stressed[personal_time < 8], na.rm=TRUE),
+         baseline_alone_y = sum(alone[personal_time < 8], na.rm=TRUE),
+         baseline_peer_y = sum(Wpeers[personal_time < 8], na.rm=TRUE),
+         baseline_alone_n = sum(alone[personal_time < 8] == 0,  na.rm=TRUE),
+         baseline_peer_n = sum(Wpeers[personal_time < 8] == 0,  na.rm=TRUE),
+         baseline_alone_pct = baseline_alone_y / (baseline_alone_y + baseline_alone_n),
+         baseline_peer_pct = sum(baseline_peer_y) / (baseline_peer_y + baseline_peer_n),
+         alone_pct = sum(alone) / n(),
+         stress_buffer_alone = mean(stressed[alone==1]) - mean(stressed[alone==0]),
+         stress_buffer_family= mean(stressed[alone==1]) - mean(stressed[Wfamily==1]),
+         stress_buffer_peer = mean(stressed[alone==1]) - mean(stressed[Wpeers==0])) %>%
+  mutate(
+         mean_stress_z = scale(mean_stress),
+         mean_na_z = scale(mean_na),
+         mean_pa_z = scale(mean_pa),
+         alone_pct_z = scale(alone_pct),
+         baseline_alone_pct_z = scale(baseline_alone_pct),
+         baseline_peer_pct_z = scale(baseline_peer_pct),
+         baseline_mean_stress_z = scale(baseline_mean_stress),
+         baseline_mean_pa_z = scale(baseline_mean_pa),
+         baseline_mean_na_z = scale(baseline_mean_na),
+         baseline_mean_stress_alone_z = scale(baseline_mean_stress_alone),
+         baseline_mean_stress_family_z = scale(baseline_mean_stress_family),
+         baseline_mean_stress_peers_z = scale(baseline_mean_stress_peers),
+         mean_stress_alone_z = scale(mean_stress_alone),
+         mean_stress_family_z = scale(mean_stress_family),
+         mean_stress_peers_z = scale(mean_stress_peers))
+
+btw_summary_data = left_join(btw_summary_data, selfreport, by = 'ID')
+btw_summary_data = mutate(btw_summary_data, stb = ifelse(Control == 0, 1, 0))
+
+participants_events_first_7 = dplyr::filter(event_for_survival_analysis, survival_time_event < 8)
+btw_summary_data = mutate(btw_summary_data, `Suicide Events\nWithin 6-Month Period`=ifelse(participant_suicide_event1==0, 'No Events', '1+ Events'),
+                          suicide_event_for_jitter=ifelse(participant_suicide_event1==0, 0.01, 0.98))
+
+btw_summary_data_ema_events = dplyr::filter(btw_summary_data, ! ID %in% participants_events_first_7$ID)
+table(btw_summary_data_ema_events$participant_suicide_event1)
+```
+
+## Using EMA data *preceding* events (EMA data only from days 0-7, events days 8+)
+
+```{r}
+group_predict_events = glm(data = btw_summary_data_ema_events, participant_suicide_event1 ~ stb + SITE,
+                               family = binomial(link = 'logit'))
+
+table(btw_summary_data_ema_events$participant_suicide_event1, btw_summary_data_ema_events$stb)
+
+tab_model(group_predict_events)
+
+ema_stress_predict_events = glm(data = btw_summary_data_ema_events, participant_suicide_event1 ~ baseline_mean_stress_z + GROUP + sex + SITE + age + iPhone,
+                               family = binomial(link = 'logit'))
+
+ema_alone_pct_predict_events = glm(data = btw_summary_data_ema_events, participant_suicide_event1 ~ baseline_alone_pct_z + GROUP + sex + SITE + age + iPhone,
+                               family = binomial(link = 'logit'))
+
+ema_peer_pct_predict_events = glm(data = btw_summary_data_ema_events, participant_suicide_event1 ~ baseline_peer_pct_z + GROUP + sex + SITE + age + iPhone,
+                               family = binomial(link = 'logit'))
+
+ema_mean_na_predict_events = glm(data = btw_summary_data_ema_events, participant_suicide_event1 ~ baseline_mean_na_z + GROUP + sex + SITE + age + iPhone,
+                               family = binomial(link = 'logit'))
+
+ema_mean_pa_predict_events = glm(data = btw_summary_data_ema_events, participant_suicide_event1 ~ baseline_mean_pa_z + GROUP + sex + SITE + age + iPhone,
+                               family = binomial(link = 'logit'))
+
+ema_stress_predict_events_si = glm(data = btw_summary_data_ema_events, participant_suicide_event1 ~ baseline_mean_stress_z + SSI21_i + sex + SITE + age + iPhone,
+                               family = binomial(link = 'logit'))
+
+ema_alone_pct_predict_events_si = glm(data = btw_summary_data_ema_events, participant_suicide_event1 ~ baseline_alone_pct_z + SSI21_i + sex + SITE + age + iPhone,
+                               family = binomial(link = 'logit'))
+
+ema_mean_na_predict_events_si = glm(data = btw_summary_data_ema_events, participant_suicide_event1 ~baseline_mean_na_z + SSI21_i + sex + SITE + age + iPhone,
+                               family = binomial(link = 'logit'))
+
+ema_mean_pa_predict_events_si = glm(data = btw_summary_data_ema_events, participant_suicide_event1 ~ baseline_mean_pa_z + SSI21_i + sex + SITE + age + iPhone,
+                               family = binomial(link = 'logit'))
+
+tab_model(stress_buffer_glm_level2, ema_stress_predict_events, ema_alone_pct_predict_events, ema_mean_na_predict_events, ema_mean_pa_predict_events,
+          ema_stress_predict_events_si, ema_alone_pct_predict_events_si, ema_mean_na_predict_events_si, ema_mean_pa_predict_events_si)
+
+
+ema_stress_coef = broom::tidy(ema_stress_predict_events, exponentiate=TRUE, conf.int=TRUE)
+ema_na_coef = broom::tidy(ema_mean_na_predict_events, exponentiate=TRUE, conf.int=TRUE)
+ema_pa_coef = broom::tidy(ema_mean_pa_predict_events, exponentiate=TRUE, conf.int=TRUE)
+ema_alone_coef = broom::tidy(ema_alone_pct_predict_events, exponentiate=TRUE, conf.int=TRUE)
+```
+
+## Emmeans plotting
+```{r}
+stress_emmeans = emmeans::emmeans(ema_stress_predict_events, specs = 'baseline_mean_stress_z', 
+                                  at = list(baseline_mean_stress_z = seq(from = min(btw_summary_data_ema_events$baseline_mean_stress_z, na.rm = TRUE), 
+                                                                         to = max(btw_summary_data_ema_events$baseline_mean_stress_z, na.rm = TRUE), by = 0.05)),
+                                  type = 'response') %>%
+  as.data.frame()
+
+stress_emmean_plt = ggplot(stress_emmeans, aes(x=baseline_mean_stress_z, y = prob)) +
+  geom_line(lwd = 2) + 
+  geom_jitter(data = btw_summary_data_ema_events, aes(x = baseline_mean_stress_z, y = suicide_event_for_jitter, 
+                                                      color = `Suicide Events\nWithin 6-Month Period`), alpha = 0.3, height = 0.005, width = 0, size = 1) +
+  geom_ribbon(aes(ymin = asymp.LCL, ymax = asymp.UCL), alpha = 0.2) +
+  labs(y = 'P(Suicide Event)\nOver 6-Months', x = 'Momentary Stress\nFirst 7 Days', title = '') +
+  theme_bw() +
+  theme(text = element_text(face='bold')) +
+  scale_color_manual(values = c('red', 'navy')) +
+  theme(legend.position = 'none') +
+  geom_text(x = 0, y = 0.75, label = paste0(
+      'aOR= ', round(ema_stress_coef$estimate[ema_stress_coef$term=='baseline_mean_stress_z'], 2),
+      ' 95% CI [', round(ema_stress_coef$conf.low[ema_stress_coef$term=='baseline_mean_stress_z'], 2),
+      ', ',  round(ema_stress_coef$conf.high[ema_stress_coef$term=='baseline_mean_stress_z'], 2), 
+      '] \np=', round(ema_stress_coef$p.value[ema_stress_coef$term=='baseline_mean_stress_z'], 3)
+      ))  +
+  ylim(0,1)
+
+pa_emmeans = emmeans::emmeans(ema_mean_pa_predict_events, specs = 'baseline_mean_pa_z', 
+                              at = list(baseline_mean_pa_z = seq(from = min(btw_summary_data_ema_events$baseline_mean_pa_z, na.rm = TRUE), 
+                                                                 to = max(btw_summary_data_ema_events$baseline_mean_pa_z, na.rm = TRUE), by = 0.05)), 
+                              type = 'response') %>%
+  as.data.frame()
+
+
+pa_emmean_plt = ggplot(pa_emmeans, aes(x=baseline_mean_pa_z, y = prob)) +
+  geom_line(lwd = 2) + 
+  geom_jitter(data = btw_summary_data_ema_events, aes(x = baseline_mean_pa_z, y = suicide_event_for_jitter, 
+                                                      color = `Suicide Events\nWithin 6-Month Period`), alpha = 0.3, height = 0.005, width = 0, size = 1) +
+  geom_ribbon(aes(ymin = asymp.LCL, ymax = asymp.UCL), alpha = 0.2) +
+  labs(y = NULL, x = 'Positive Affect\nFirst 7 Days', title = '') +
+  theme_bw() +
+  theme(text = element_text(face='bold')) +
+  scale_color_manual(values = c('red', 'navy')) +
+  theme(legend.position = 'none') +
+  geom_text(x = 0, y = 0.75, label = paste0(
+      'aOR= ', round(ema_pa_coef$estimate[ema_pa_coef$term=='baseline_mean_pa_z'], 2),
+      ' 95% CI [', round(ema_pa_coef$conf.low[ema_pa_coef$term=='baseline_mean_pa_z'], 2),
+      ', ',  round(ema_pa_coef$conf.high[ema_pa_coef$term=='baseline_mean_pa_z'], 2), 
+      '] \np=', round(ema_pa_coef$p.value[ema_pa_coef$term=='baseline_mean_pa_z'], 3)
+      ))  +
+  ylim(0,1)
+
+
+na_emmeans = emmeans::emmeans(ema_mean_na_predict_events, specs = 'baseline_mean_na_z', 
+                              at = list(baseline_mean_na_z = seq(from = min(btw_summary_data_ema_events$baseline_mean_na_z, na.rm = TRUE),
+                                                                 to = max(btw_summary_data_ema_events$baseline_mean_na_z, na.rm = TRUE), by = 0.05)), 
+                              type = 'response') %>%
+  as.data.frame()
+
+
+na_emmean_plt = ggplot(na_emmeans, aes(x=baseline_mean_na_z, y = prob)) +
+  geom_line(lwd = 2) + 
+  geom_jitter(data = btw_summary_data_ema_events, aes(x = baseline_mean_na_z, y = suicide_event_for_jitter, 
+                                                      color = `Suicide Events\nWithin 6-Month Period`), alpha = 0.3, height = 0.005, width = 0, size = 1) +
+  geom_ribbon(aes(ymin = asymp.LCL, ymax = asymp.UCL), alpha = 0.2) +
+  labs(y = NULL, x = 'Negative Affect\nFirst 7 Days', title = '') +
+  theme_bw() +
+  theme(text = element_text(face='bold')) +
+  scale_color_manual(values = c('red', 'navy')) +
+  theme(legend.position = 'none') +
+  geom_text(x = 0.1, y = 0.75, label = paste0(
+      'aOR= ', round(ema_na_coef$estimate[ema_na_coef$term=='baseline_mean_na_z'], 2),
+      ' 95% CI [', round(ema_na_coef$conf.low[ema_na_coef$term=='baseline_mean_na_z'], 2),
+      ', ',  round(ema_na_coef$conf.high[ema_na_coef$term=='baseline_mean_na_z'], 2), 
+      '] \np=', round(ema_na_coef$p.value[ema_na_coef$term=='baseline_mean_na_z'], 3)
+      ))  +
+  ylim(0,1)
+
+alone_pct_emmeans = emmeans::emmeans(ema_alone_pct_predict_events, specs = 'baseline_alone_pct_z', 
+                                     at = list(baseline_alone_pct_z = seq(from = min(btw_summary_data_ema_events$baseline_alone_pct_z, na.rm = TRUE), 
+                                                                          to = max(btw_summary_data_ema_events$baseline_alone_pct_z, na.rm = TRUE), by = 0.05)), 
+                                     type = 'response') %>%
+  as.data.frame()
+
+ 
+alone_pct_emmean_plt = ggplot(alone_pct_emmeans, aes(x=baseline_alone_pct_z, y = prob)) +
+  geom_line(lwd = 2) + 
+  geom_jitter(data = btw_summary_data_ema_events, aes(x = baseline_alone_pct_z, y = suicide_event_for_jitter, 
+                                                      color = `Suicide Events\nWithin 6-Month Period`), alpha = 0.3, height = 0.005, width = 0, size = 1) +
+  geom_ribbon(aes(ymin = asymp.LCL, ymax = asymp.UCL), alpha = 0.2) +
+  labs(y = NULL, x = '% of Prompts Spent Alone\nFirst 7 Days', title = '') +
+  theme_bw() +
+  theme(text = element_text(face='bold')) +
+  scale_color_manual(values = c('red', 'navy')) +
+  theme(legend.position = 'none') +
+  geom_text(x = 0.5, y = 0.75, label = paste0(
+      'aOR= ', round(ema_alone_coef$estimate[ema_alone_coef$term=='baseline_alone_pct_z'], 2),
+      ' 95% CI [', round(ema_alone_coef$conf.low[ema_alone_coef$term=='baseline_alone_pct_z'], 2),
+      ', ',  round(ema_alone_coef$conf.high[ema_alone_coef$term=='baseline_alone_pct_z'], 2), 
+      '] \np=', round(ema_alone_coef$p.value[ema_alone_coef$term=='baseline_alone_pct_z'], 3)
+      ))  +
+  ylim(0,1)
+
+ema_predict_suicide_events_grid = cowplot::plot_grid(stress_emmean_plt, alone_pct_emmean_plt, na_emmean_plt, pa_emmean_plt, 
+                                                     nrow = 1, rel_widths= c(1.1, 1, 1, 1),
+                                                     labels = c('A', 'B', 'C', 'D'))
+
+
+cowplot::save_plot(ema_predict_suicide_events_grid, filename = '../figures/main/3_ema_predict_suicide_events.png', base_height = 5, base_width = 12)
+```
+
+
+## Models only among participants with stb history
+```{r}
+ema_stress_predict_events_stb = glm(data = btw_summary_data_ema_events %>% dplyr::filter(stb==1), participant_suicide_event1 ~ baseline_mean_stress_z + sex + SITE + age + iPhone,
+                               family = binomial(link = 'logit'))
+
+ema_alone_pct_predict_events_stb = glm(data = btw_summary_data_ema_events%>% dplyr::filter(stb==1), participant_suicide_event1 ~ baseline_alone_pct_z + sex + SITE + age + iPhone,
+                               family = binomial(link = 'logit'))
+
+ema_mean_na_predict_events_stb = glm(data = btw_summary_data_ema_events%>% dplyr::filter(stb==1), participant_suicide_event1 ~ baseline_mean_na_z + sex + SITE + age + iPhone,
+                               family = binomial(link = 'logit'))
+
+ema_mean_pa_predict_events_stb = glm(data = btw_summary_data_ema_events%>% dplyr::filter(stb==1), participant_suicide_event1 ~ baseline_mean_pa_z + sex + SITE + age + iPhone,
+                               family = binomial(link = 'logit'))
+
+tab_model(ema_stress_predict_events_stb, ema_alone_pct_predict_events_stb, ema_mean_na_predict_events_stb, ema_mean_pa_predict_events_stb)
+```
+
+# Covarying for strain
+```{r}
+ema_stress_predict_events_strain = glm(data = btw_summary_data_ema_events, participant_suicide_event1 ~ baseline_mean_stress_z + GROUP + sex + SITE + age + iPhone + StressTH,
+                               family = binomial(link = 'logit'))
+
+ema_alone_pct_predict_events_strain = glm(data = btw_summary_data_ema_events, participant_suicide_event1 ~ baseline_alone_pct_z + GROUP + sex + SITE + age + iPhone + StressTH,
+                               family = binomial(link = 'logit'))
+
+ema_peer_pct_predict_events_strain = glm(data = btw_summary_data_ema_events, participant_suicide_event1 ~ baseline_peer_pct_z + GROUP + sex + SITE + age + iPhone + StressTH,
+                               family = binomial(link = 'logit'))
+
+ema_mean_na_predict_events_strain = glm(data = btw_summary_data_ema_events, participant_suicide_event1 ~ baseline_mean_na_z + GROUP + sex + SITE + age + iPhone + StressTH,
+                               family = binomial(link = 'logit'))
+
+ema_mean_pa_predict_events_strain = glm(data = btw_summary_data_ema_events, participant_suicide_event1 ~ baseline_mean_pa_z + GROUP + sex + SITE + age + iPhone + StressTH,
+                               family = binomial(link = 'logit'))
+
+tab_model(ema_stress_predict_events_strain, ema_alone_pct_predict_events_strain, ema_mean_na_predict_events_strain, ema_mean_pa_predict_events_strain)
+
+```
+
+
+# Prediction of suicidal ideation
+```{r}
+ema_stress_predict_si= lm(data = btw_summary_data_ema_events, scale(SSI19_6) ~ baseline_mean_stress_z + GROUP + sex + SITE + age + iPhone)
+
+ema_alone_pct_predict_si = lm(data = btw_summary_data_ema_events, scale(SSI19_6) ~ baseline_alone_pct_z + GROUP + sex + SITE + age + iPhone)
+
+ema_mean_na_predict_si = lm(data = btw_summary_data_ema_events, scale(SSI19_6) ~ baseline_mean_na_z + GROUP + sex + SITE + age + iPhone)
+
+ema_mean_pa_predict_si = lm(data = btw_summary_data_ema_events, scale(SSI19_6) ~ baseline_mean_pa_z + GROUP + sex + SITE + age + iPhone)
+
+tab_model(ema_stress_predict_si, ema_alone_pct_predict_si, ema_mean_na_predict_si, ema_mean_pa_predict_si)
+
+```
+
+
+# Prediction of depression
+```{r}
+ema_stress_predictmfq= lm(data = btw_summary_data_ema_events, scale(MFQ_6) ~ baseline_mean_stress_z + GROUP + sex + SITE + age + iPhone)
+
+ema_alone_pct_predictmfq = lm(data = btw_summary_data_ema_events, scale(MFQ_6) ~ baseline_alone_pct_z + GROUP + sex + SITE + age + iPhone)
+
+ema_mean_na_predictmfq = lm(data = btw_summary_data_ema_events,scale(MFQ_6) ~ baseline_mean_na_z + GROUP + sex + SITE + age + iPhone)
+
+ema_mean_pa_predictmfq = lm(data = btw_summary_data_ema_events, scale(MFQ_6) ~ baseline_mean_pa_z + GROUP + sex + SITE + age + iPhone)
+
+tab_model(ema_stress_predictmfq, ema_alone_pct_predictmfq, ema_mean_na_predictmfq, ema_mean_pa_predictmfq)
+
+```
+
+
+
+# Strain prediction of events
+
+```{r}
+
+strain_characteristics = c('CIAllCT', 'CIAllTH', 'CDAllCT', 'CDAllTH', 'CHAllCT', 'CHAllTH', 'CEAllCT', 'CEAllTH', 'CRAllCT',
+                           'CRAllTH', 'StressCT', 'StressTH', 'EvntCT', 'DiffCT', 'EvntTH','DiffTH')
+
+
+btw_summary_data = mutate(btw_summary_data,
+                       # Count
+                       RecDAllCT = RecDDiffCT + RecEvntCT,
+                       RecEAllCT = RecEDiffCT + RecEvntCT,
+                       RecHAllCT = RecHDiffCT + RecEvntCT,
+                       RecLAllCT = RecLDiffCT + RecEvntCT,
+                       RecRAllCT = RecRDiffCT + RecEvntCT,
+                       # Severity
+                       RecDAllTH = RecDDiffTH + RecEvntTH,
+                       RecEAllTH = RecEDiffTH + RecEvntTH,
+                       RecHAllTH = RecHDiffTH + RecEvntTH,
+                       RecLAllTH = RecLDiffTH + RecEvntTH,
+                       RecRAllTH = RecRDiffTH + RecEvntTH
+                       )
+
+strain_characteristics_pastyear = c('RecDAllCT', 'RecEAllCT', 'RecHAllCT', 'RecLAllCT', 'RecRAllCT',
+                                    'RecDAllTH', 'RecEAllTH', 'RecHAllTH', 'RecLAllTH', 'RecRAllTH', 
+                                    'RecTotCT', 'RecTotTH', 'RecEvntCT', 'RecEvntTH', 'RecDiffCT', 'RecDiffTH')
+
+
+strain_event_models1 = btw_summary_data %>%
+    pivot_longer(all_of(c(strain_characteristics, strain_characteristics_pastyear))) %>%
+    group_by(name) %>%
+    mutate(value_scale = scale(value)) %>%
+    nest() %>%
+    mutate(m = purrr::map(data, ~glm(data = ., family = binomial(link = 'logit'),
+                                                       participant_suicide_event1 ~ value_scale + age + sex + SITE + iPhone)),
+           model_coef= purrr::map(m, ~broom::tidy(., conf.int=TRUE, exponentiate=TRUE)),
+           ctrl_baseline_si = 'No')
+
+strain_event_models2 = btw_summary_data %>%
+    pivot_longer(all_of(c(strain_characteristics, strain_characteristics_pastyear))) %>%
+    group_by(name) %>%
+    mutate(value_scale = scale(value)) %>%
+    nest() %>%
+    mutate(m = purrr::map(data, ~glm(data = ., family = binomial(link = 'logit'),
+                                                       participant_suicide_event1 ~ value_scale + age + Control + sex + SITE + iPhone)),
+           model_coef= purrr::map(m, ~broom::tidy(., conf.int=TRUE, exponentiate=TRUE)),
+           ctrl_baseline_si = 'Yes')
+
+strain_event_models = rbind(strain_event_models1, strain_event_models2)
+
+
+strain_coef = strain_event_models %>%
+  unnest(model_coef) %>%
+  dplyr::select(-data, -m) %>%
+  dplyr::filter(term == 'value_scale') %>%
+  dplyr::mutate(characteristic = case_when(
+        startsWith(name, 'CI') ~ 'Interpersonal Loss',
+        startsWith(name, 'CD') ~ 'Physical Danger',
+        startsWith(name, 'CH') ~ 'Humiliation',
+        startsWith(name, 'CE') ~ 'Entrapment',
+        startsWith(name, 'CR') ~ 'Role Change/Reversal',
+        startsWith(name, 'Stress') ~ 'Total Stressors',
+        startsWith(name, 'Evnt') ~ 'Total Acute Life Events',
+        startsWith(name, 'Diff') ~ 'Total Chronic Difficulties',
+        name == 'RecDAllTH' ~ 'Physical Danger',
+        name == 'RecEAllTH' ~ 'Entrapment',
+        name == 'RecHAllTH'~ 'Humiliation', 
+        name == 'RecLAllTH' ~ 'Interpersonal Loss',
+        name =='RecRAllTH' ~ 'Role Change/Reversal',
+        name =='RecTotTH' ~ 'Total Stressors',
+        name =='RecEvntTH' ~ 'Total Acute Life Events',
+        name == 'RecDiffTH'~ 'Total Chronic Difficulties'
+    ),
+    strain_timing = ifelse(startsWith(name, 'Rec'), 'Past Year', 'Lifetime'),
+    strain_type = case_when(
+        endsWith(name, 'TH') ~ 'Severity',
+         endsWith(name, 'CT') ~ 'Count'),
+    strain_total = case_when(
+      grepl('Total', characteristic) ~ 'Total Summaries',
+      !grepl('Total', characteristic) ~ 'Core Social-Psych\nCharacteristics'
+    )) %>%
+  dplyr::filter(strain_type == 'Severity')
+
+
+strain_events_plot = strain_coef %>%
+  dplyr::filter(ctrl_baseline_si == 'Yes') %>%
+  ggplot(data = , aes(x = characteristic, color = strain_timing, y = estimate)) +
+  geom_point(position = position_dodge(0.3), size = 3) +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0, 
+                position = position_dodge(0.3),
+                lwd = 1) +
+  theme_bw() +
+  coord_flip() +
+  facet_grid(rows = vars(strain_total), scales = 'free_y') +
+  geom_hline(yintercept = 1, lty = 2) +
+  labs(color = 'Metric', x = NULL, y = 'Ajusted Odds Ratio',
+       title = 'Associations between prior stress & adversity severity\n& suicide events within study period') +
+  scale_color_manual(values = c('black', 'red4'))
+
+ggsave(strain_events_plot, file = '../figures/supplement/strain_events_plot.png', height = 7, width = 7)
+```
+
+## Survival analysis
+
+
+```{r}
+event_for_survival_analysis = left_join(event_for_survival_analysis, btw_summary_data, by = 'ID')
+event_for_survival_analysis = mutate(event_for_survival_analysis, baseline_mean_stress_z_split = baseline_mean_stress_z > median(baseline_mean_stress_z, na.rm=TRUE))
+
+#event_for_survival_analysis = dplyr::mutate(event_for_survival_analysis, survival_time_event = ifelse(survival_time_event >250, 250, survival_time_event))
+
+df_for_cox_models = dplyr::select(event_for_survival_analysis,ID, survival_time_event, 
+                                  suicide_event1_participant, baseline_mean_stress_z_split, contains('baseline'), GROUP, SSI19_i, age, sex, SITE)
+
+# TEST: group
+gen_fit = survival::survfit(Surv(survival_time_event, suicide_event1_participant) ~ GROUP, data=df_for_cox_models)
+autoplot(gen_fit)
+
+# stress
+stress_cox = coxph(Surv(survival_time_event, suicide_event1_participant) ~ baseline_mean_stress_z + GROUP + age + sex + SITE, data=df_for_cox_models)
+stress_cox2 = coxph(Surv(survival_time_event, suicide_event1_participant) ~ baseline_mean_stress_z + SSI19_i + age + sex + SITE, data=df_for_cox_models)
+stress_cox_medsplit = survival::survfit(Surv(survival_time_event, suicide_event1_participant) ~ baseline_mean_stress_z_split, data=df_for_cox_models)
+stress_cox_medsplit_m = coxph(Surv(survival_time_event, suicide_event1_participant) ~ baseline_mean_stress_z_split + SSI19_i + age + sex + SITE, data=df_for_cox_models)
+
+
+
+# PA
+pa_cox = coxph(Surv(survival_time_event, suicide_event1_participant) ~ baseline_mean_pa_z + GROUP + age + sex + SITE, data=df_for_cox_models)
+pa_cox2 = coxph(Surv(survival_time_event, suicide_event1_participant) ~ baseline_mean_pa_z + SSI19_i + age + sex + SITE, data=df_for_cox_models)
+
+# NA
+na_cox = coxph(Surv(survival_time_event, suicide_event1_participant) ~ baseline_mean_na_z + GROUP + age + sex + SITE, data=df_for_cox_models)
+na_cox2 = coxph(Surv(survival_time_event, suicide_event1_participant) ~ baseline_mean_na_z + SSI19_i + age + sex + SITE, data=df_for_cox_models)
+
+# alone
+alone_pct_cox = coxph(Surv(survival_time_event, suicide_event1_participant) ~ baseline_alone_pct_z + GROUP + age + sex + SITE, data=df_for_cox_models)
+alone_pct_cox2 = coxph(Surv(survival_time_event, suicide_event1_participant) ~ baseline_alone_pct_z + SSI19_i+ age + sex + SITE, data=df_for_cox_models)
+
+
+
+tab_model(stress_cox, pa_cox, na_cox, alone_pct_cox, stress_cox_medsplit_m)
+tab_model(stress_cox2, pa_cox2, na_cox2, alone_pct_cox2)
+
+
+cox.zph(stress_cox, transform = 'km', terms = TRUE, singledf=FALSE, global=TRUE)
+
+```
+
+# Zero-inflated poisson regression predicting # of events
+
+```{r}
+btw_summary_data_ema_events = left_join(btw_summary_data_ema_events, dplyr::select(sum_suicide_events_participant, ID=ptid, n_events = n), by = 'ID')
+
+btw_summary_data_ema_events = mutate(btw_summary_data_ema_events, n_events = ifelse(is.na(n_events), 0, n_events))
+
+
+ggplot(btw_summary_data_ema_events, aes(x = baseline_mean_stress_z, y = n_events)) +
+  geom_point() +
+  geom_smooth(method='lm')
+
+
+length_on_study = event_for_survival_analysis %>%
+  mutate(length_in_study = as.numeric(end_date - start_date)) %>%
+  dplyr::select(ID, length_in_study)
+
+btw_summary_data_ema_events = left_join(btw_summary_data_ema_events, length_on_study, by = 'ID')
+
+
+zip_stress1 = pscl::zeroinfl(n_events ~ baseline_mean_stress_z  +GROUP  + offset(log(length_in_study)) | baseline_mean_stress_z +GROUP+ offset(log(length_in_study)), data = btw_summary_data_ema_events)
+
+summary(zip_stress1)
+```
+
+# Does positive affect buffer negative affect / stress? (interaction models)
+```{r}
+ema_stress_buffer = glm(data = btw_summary_data_ema_events, participant_suicide_event1 ~ baseline_mean_stress_z*baseline_mean_pa_z + GROUP + sex + SITE + age + iPhone,
+                               family = binomial(link = 'logit'))
+
+ema_na_buffer = glm(data = btw_summary_data_ema_events, participant_suicide_event1 ~ baseline_mean_na_z*baseline_mean_pa_z + GROUP + sex + SITE + age + iPhone,
+                               family = binomial(link = 'logit'))
+
+
+tab_model(ema_stress_buffer, ema_na_buffer, show.est = TRUE, transform = NULL)
+```

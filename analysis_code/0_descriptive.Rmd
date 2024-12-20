@@ -1,0 +1,341 @@
+---
+title: "Baseline groups stress"
+author: "Paul A. Bloom"
+date: "2023-07-18"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Time spent alone vs with others {.tabset}
+
+## Setup
+
+```{r}
+library(Matrix)
+library(tidyverse)
+library(lme4)
+library(lmerTest)
+library(sjPlot)
+library(brms)
+library(scipub)
+
+load('../cleaned_data/cleaned_data_for_stress_social_context_project_2024-12-16.rda')
+```
+
+### Calculate Stats on Missing Data
+```{r}
+possible_obs = 4 * (5*4 + 2*7)
+
+EMAsummary = mutate(EMAsummary, pct_resp = Nresp/possible_obs) 
+
+
+EMAsummary_over5 = EMAsummary %>% dplyr::filter(Nresp >= 5) 
+
+summary(EMAsummary_over5$pct_resp)
+
+summary(EMAsummary_over5$Nresp)
+
+
+ema_missing_group = left_join(EMAsummary_over5, selfreport, by = 'ID')
+
+
+ema_missing_group_model = lm(data=ema_missing_group, Nresp ~ Control)
+
+ema_missing_group %>%
+  group_by(Control) %>%
+  summarise(mean_resp = mean(Nresp),
+            n = n())
+
+summary(ema_missing_group_model)
+
+
+over_n_resp = EMAsummary %>% dplyr::filter(Nresp > possible_obs)
+
+
+sum(over_n_resp$Nresp) - possible_obs * nrow(over_n_resp)
+
+ema_days = ema_data %>%
+  group_by(ID, Day) %>%
+  count() %>%
+  group_by(ID) %>%
+  count()
+
+
+ema_by_timepoint = ema_data %>%
+  group_by(timepoint, ID) %>%
+  count() %>%
+  group_by(timepoint) %>%
+  summarise(mean = mean(n))
+  
+
+id_check = selfreport %>%
+  dplyr::filter(ID %in% ema_data$ID) 
+
+
+table(id_check$GROUP)
+
+hist(ema_days$n)
+
+summary(ema_days$n)
+```
+
+# Associations between stress & affect (within-participants)
+
+```{r}
+stress_na = lmerTest::lmer(data = ema_data, mean_na ~ stressed + (stressed | ID))
+summary(stress_na)
+
+
+ema_cors = ema_data %>%
+  group_by(ID) %>%
+  summarise(stress_na_cor = cor(stressed, mean_na),
+            stress_pa_cor = cor(stressed, mean_pa),
+            na_pa_cor = cor(mean_na, mean_pa)) %>%
+  tidyr::pivot_longer(contains('cor')) %>%
+  mutate(name = dplyr::recode(name, `na_pa_cor`='Negative Affect ~ Positive Affect',
+                              `stress_na_cor`=' Stress ~ Negative Affect',
+                              `stress_pa_cor`=' Stress ~ Positive Affect'))
+
+ema_cors_fig = ggplot(ema_cors, aes(x = name,y = value)) +
+  geom_boxplot(width = 0.1, outlier.shape = NA) +
+  geom_jitter(width = 0.1, size = 0.5, alpha = 0.3) +
+  theme_bw() +
+  geom_hline(yintercept = 0, lty =2, color = 'purple') +
+  labs(y = 'Within-Participant Correlations', x = NULL,
+       title = 'Correlations between Momentary Stress & Affect')
+
+ggsave(ema_cors_fig, file = '../figures/supplement/ema_cors.png', height = 4, width = 6)
+```
+
+# Strain descriptives
+
+```{r}
+strain_characteristics_lifetime = c('CIAllCT', 'CIAllTH', 'CDAllCT', 'CDAllTH', 'CHAllCT', 'CHAllTH', 'CEAllCT', 'CEAllTH', 'CRAllCT', 'CRAllTH',
+                           'StressCT', 'StressTH', 'EvntCT', 'DiffCT', 'EvntTH','DiffTH')
+
+
+selfreport = mutate(selfreport,
+                       # Count
+                       RecDAllCT = RecDDiffCT + RecEvntCT,
+                       RecEAllCT = RecEDiffCT + RecEvntCT,
+                       RecHAllCT = RecHDiffCT + RecEvntCT,
+                       RecLAllCT = RecLDiffCT + RecEvntCT,
+                       RecRAllCT = RecRDiffCT + RecEvntCT,
+                       # Severity
+                       RecDAllTH = RecDDiffTH + RecEvntTH,
+                       RecEAllTH = RecEDiffTH + RecEvntTH,
+                       RecHAllTH = RecHDiffTH + RecEvntTH,
+                       RecLAllTH = RecLDiffTH + RecEvntTH,
+                       RecRAllTH = RecRDiffTH + RecEvntTH
+                       )
+
+strain_characteristics_pastyear = c('RecDAllCT', 'RecEAllCT', 'RecHAllCT', 'RecLAllCT', 'RecRAllCT',
+                                    'RecDAllTH', 'RecEAllTH', 'RecHAllTH', 'RecLAllTH', 'RecRAllTH', 
+                                    'RecTotCT', 'RecTotTH', 'RecEvntCT', 'RecEvntTH', 'RecDiffCT', 'RecDiffTH')
+
+
+strain_df = dplyr::select(selfreport, 
+                          'RecTotTH', 'RecDiffTH', 'RecEvntTH', 'StressTH', 'EvntTH','DiffTH',  'EvntTH','DiffTH')
+
+
+cormat = strain_df %>%
+  dplyr::filter(complete.cases(.)) %>%
+  cor()
+
+cormat %>%
+  corrplot::corrplot(., addCoef.col = 'black', method = 'color')
+
+
+corrplot::corrplot.mixed(cormat, order = 'FPC')
+
+```
+
+## Descriptive stats by group
+```{r}
+selfreport_for_table = selfreport
+
+selfreport_for_table = dplyr::filter(selfreport_for_table, ID %in% ema_data$ID)
+
+selfreport_for_table = mutate(selfreport_for_table,
+                              income = replace_na(income, 'Missing'),
+                              parentscollege = replace_na(as.character(parentscollege), 'Missing'),
+                              heterosexual = replace_na(as.character(heterosexual), 'Missing'),
+                              iPhone = replace_na(as.character(iPhone), 'Missing'),
+                              stb = ifelse(Control ==1, 'PC', 'STB'))
+
+b = scipub::FullTable1(data = selfreport_for_table,
+                     vars = c('SITE', 'sex', 'race', 'age', 'hispanic', 'income', 'parentscollege', 'heterosexual', 'cisgender', 'iPhone', 
+                              'SSI19_i', 'MFQ_i', 'sitbi_nssi_behaviors_ever','SCARED_i', 'StressTH', 'RecTotTH'), 
+                     strata = 'stb')
+
+scipub::FullTable1(data = selfreport_for_table,
+                     vars = c('SITE', 'sex', 'race', 'age', 'hispanic', 'income', 'parentscollege', 'heterosexual', 'cisgender', 'iPhone', 
+                              'SSI19_i', 'MFQ_i', 'SCARED_i','StressTH', 'RecTotTH'), 
+                     strata = 'stb')
+
+
+write.csv(b, file = '../tables/output_for_table1.csv', row.names=FALSE)
+```
+
+
+## Overall proportion of time in each context
+```{r}
+ema_data_a = dplyr::filter(ema_data, !is.na(timeWith_cat3))
+round(table(ema_data_a$timeWith_cat3) / nrow(ema_data_a), 3)
+```
+
+## Social context ~ school closure 
+```{r}
+beta_prior_logit = c(prior_string("student_t(3, 0, 10)", class = "b"))
+
+multinom_schoolclosure = brms::brm(data = ema_data, timeWith_cat3 ~ schoolclosure + weekend + personal_time + (1|ID), 
+                           family = categorical(link = 'logit'),
+                           prior = beta_prior_logit, 
+                           cores = 4, seed = 11291993, iter = 2000)
+
+
+save(multinom_schoolclosure, file = '../model_outputs/schoolclosure_social_context.rda')
+
+fixef(multinom_schoolclosure)
+```
+
+
+## Stress / Affect ~ School Closure
+```{r}
+school_stress = lme4::lmer(data = ema_data, stressed ~ schoolclosure + (1|ID)) %>%
+  emmeans::emmeans(specs = ~schoolclosure) %>%
+  as.data.frame() %>%
+  mutate(schoolclosure = ifelse(schoolclosure=='1', 'Closed During Pandemic', 'Open In-Person')) %>%
+  ggplot(data = ., aes(x = schoolclosure, y = emmean)) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = asymp.LCL, ymax = asymp.UCL), width = 0, lwd =1) +
+  theme_bw() + 
+  labs(x = 'Local Public High School Closures', y = 'Estimated Mean + 95% CI', title = 'A: Stress') +
+  ylim(0, 100)
+
+school_na = lme4::lmer(data = ema_data, mean_na ~ schoolclosure + (1|ID)) %>%
+  emmeans::emmeans(specs = ~schoolclosure) %>%
+  as.data.frame() %>%
+  mutate(schoolclosure = ifelse(schoolclosure=='1', 'Closed During Pandemic', 'Open In-Person')) %>%
+  ggplot(data = ., aes(x = schoolclosure, y = emmean)) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = asymp.LCL, ymax = asymp.UCL), width = 0, lwd =1) +
+  theme_bw() + 
+  labs(x = 'Local Public High School Closures', y = '', title = 'B: Negative Affect') +
+  ylim(0, 100)
+
+school_pa = lme4::lmer(data = ema_data, mean_pa ~ schoolclosure + (1|ID)) %>%
+  emmeans::emmeans(specs = ~schoolclosure) %>%
+  as.data.frame() %>%
+  mutate(schoolclosure = ifelse(schoolclosure=='1', 'Closed During Pandemic', 'Open In-Person')) %>%
+  ggplot(data = ., aes(x = schoolclosure, y = emmean)) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = asymp.LCL, ymax = asymp.UCL), width = 0, lwd =1) +
+  theme_bw() + 
+  labs(x = 'Local Public High School Closures', y = '', title = 'C: Positive Affect') +
+  ylim(0, 100)
+
+cowplot::plot_grid(school_stress, school_na, school_pa, nrow = 1)
+
+
+tab_model(lmerTest::lmer(data = ema_data, stressed ~ schoolclosure + (1|ID)),
+          lmerTest::lmer(data = ema_data, mean_na ~ schoolclosure + (1|ID)),
+          lmerTest::lmer(data = ema_data, mean_pa ~ schoolclosure + (1|ID)))
+
+```
+
+
+```{r}
+load('../model_outputs/schoolclosure_social_context.rda')
+summary(multinom_schoolclosure)
+
+
+probability_to_odds = function(probability){
+  return(probability / (1-probability))
+}
+
+pred_grid_schoolclosure = expand.grid(weekend = 0, 
+                                     personal_time = mean(ema_data$personal_time, na.rm = TRUE),
+                                     schoolclosure = 0:1)
+
+
+schoolclosure_cond_fx_draws = fitted(multinom_schoolclosure, newdata = pred_grid_schoolclosure, 
+                                re_formula = NA, incl_autocor=TRUE, summary = FALSE, scale = 'response', categorical=TRUE) %>%
+  as.data.frame() %>%
+  mutate(diff_alone = `2.alone` - `1.alone`,
+         diff_family = `2.family` - `1.family`,
+         diff_peer = `2.peer` - `1.peer`, 
+         or_alone = probability_to_odds(`2.alone`) / probability_to_odds(`1.alone`),
+         or_family = probability_to_odds(`2.family`) / probability_to_odds(`1.family`),
+         or_peer = probability_to_odds(`2.peer`) / probability_to_odds(`1.peer`)) 
+
+
+schoolclosure_cond_fx_draws %>%
+  bayestestR::hdi(ci=0.95) %>%
+  as.data.frame() 
+
+schoolclosure_cond_fx_draws %>%
+  colMeans() %>%
+  as.data.frame() 
+
+schoolclosure_cond_fx = conditional_effects(multinom_schoolclosure, categorical=TRUE, scale='response', robust = FALSE, 
+                                       re_formula = NA, method = 'fitted')
+
+
+schoolclosure_cond_fx$`schoolclosure:cats__` %>% dplyr::filter(schoolclosure %in% 0:1)
+
+```
+
+
+## Histograms
+
+```{r}
+ema_descriptive = ema_data %>% dplyr::select(ID, stressed, mean_pa, mean_na) %>%
+    pivot_longer(-ID) 
+
+ema_histograms = ema_descriptive %>%
+    mutate(name = dplyr::recode(name, 'stressed'='Stress', 'mean_pa'='Positive\nAffect', 'mean_na'='Negative\nAffect')) %>%
+    ggplot(data = ., aes(x = value)) +
+    geom_histogram(bins = 100) +
+    facet_grid(~name) +
+    theme_bw()
+
+
+ggsave(ema_histograms, file = '../figures/supplement/ema_histograms.png', width = 6, height = 4)
+```
+
+
+## ICC
+```{r}
+stress_icc = lmer(data = ema_data, stressed ~ personal_time + (1|ID))
+sjPlot::tab_model(stress_icc)
+
+na_icc = lmer(data = ema_data, mean_na ~ personal_time + (1|ID))
+sjPlot::tab_model(na_icc)
+
+pa_icc = lmer(data = ema_data, mean_pa ~ personal_time + (1|ID))
+sjPlot::tab_model(pa_icc)
+
+
+```
+
+
+
+
+```{r}
+
+table(selfreport$GROUP)
+
+
+ggplot(data = selfreport, aes(x = GROUP, y = SSI21_i)) +
+  geom_jitter(height = 0, width = 0.2)
+
+
+checks = selfreport %>%
+  dplyr::filter(GROUP=='Attempter', SSI19_i==0) %>%
+  dplyr::select(ID, GROUP, SSI19_i, contains('sitbi'))
+  
+```

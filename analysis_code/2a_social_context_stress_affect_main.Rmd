@@ -1,0 +1,487 @@
+---
+title: "Social Context, Affect, and Stress"
+author: "Paul A. Bloom"
+date: "2023-07-18"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Time spent alone vs with others {.tabset}
+
+## Setup
+
+```{r}
+library(Matrix)
+library(tidyverse)
+library(lme4)
+library(lmerTest)
+library(sjPlot)
+library(brms)
+load('../cleaned_data/cleaned_data_for_stress_social_context_project_2024-12-16.rda')
+
+# student t prior with 3df, center at 0, scale parameter 10
+beta_prior_logit = c(prior_string("student_t(3, 0, 10)", class = "b"))
+
+# student t prior with 3df, center at 0, scale parameter 100 (for non-scaled EMA outcomes on a 1-100 scale)
+ema_beta_100_prior = c(prior_string("student_t(3, 0, 100)", class = "b"))
+```
+
+
+# 1. Affect & Stress ~ Concurrent Social Context (Whole Group)
+
+```{r}
+ema_data = mutate(ema_data, 
+                  alone_vs_family = case_when(
+                    timeWith_cat3 == 'alone' ~ 1,
+                    timeWith_cat3 == 'peer' ~ NA_real_,
+                    timeWith_cat3 == 'family' ~ 0),
+                  alone_vs_peer = case_when(
+                    timeWith_cat3 == 'alone' ~ 1,
+                    timeWith_cat3 == 'family' ~ NA_real_,
+                    timeWith_cat3 == 'peer' ~ 0))
+
+ema_data = mutate(ema_data,
+                  weekend = as.numeric(as.character(weekend)),
+                  schoolclosure = as.numeric(as.character(schoolclosure)),
+                  summerbreak = as.numeric(as.character(summerbreak)),
+                  personal_time_z = scale(personal_time))
+
+
+ema_data_check = ema_data %>%
+  group_by(ID) %>%
+  summarise(n = n(),
+            age = age[1],
+            sex = sex[1],
+            SITE = SITE[1],
+            GROUP=GROUP[1])
+
+
+schoolclosure_na = ema_data %>% dplyr::filter(is.na(schoolclosure))
+
+
+ema_data = dplyr::left_join(ema_data, dplyr::select(selfreport, ID, participant_suicide_event1), by = 'ID')
+
+sum(is.na(ema_data$participant_suicide_event1))
+```
+
+
+```{r, echo=FALSE}
+stress_social_context = brms::brm(data = ema_data, stressed_within_center ~ timeWith_cat3 + weekend + personal_time_z + schoolclosure + (timeWith_cat3|ID) +
+                                ar(time = datetime, gr=id_timepoint), 
+                              cores = 4, seed = 11291993, iter = 4000,
+                              prior = ema_beta_100_prior)
+
+na_social_context = brms::brm(data = ema_data, na_within ~ timeWith_cat3 + weekend + personal_time_z + schoolclosure + (timeWith_cat3|ID) +
+                                ar(time = datetime, gr=id_timepoint), 
+                              cores = 4, seed = 11291993, iter = 4000,
+                              prior = ema_beta_100_prior)
+
+pa_social_context = brms::brm(data = ema_data, pa_within ~ timeWith_cat3 + weekend + personal_time_z + schoolclosure + (timeWith_cat3|ID) +
+                                ar(time = datetime, gr=id_timepoint), 
+                              cores = 4, seed = 11291993, iter = 4000,
+                              prior = ema_beta_100_prior)
+```
+
+## 1. Affect & Stress ~ Concurrent Social Context (Alone vs. with others)
+
+```{r}
+ema_data = ema_data %>%
+  group_by(ID) %>%
+  mutate(alone_centered = scale(as.numeric(as.character(alone))),
+         alone_mean = mean(as.numeric(as.character(alone)), na.rm=T)) %>%
+  ungroup()
+
+
+# preliminary model
+m1 = lmerTest::lmer(data = ema_data, stressed ~ alone  +  weekend + personal_time_z  + schoolclosure + SITE + 
+                  (alone|ID))
+
+summary(m1)
+```
+
+```{r}
+stress_social_context_case_control = brms::brm(data = ema_data, stressed ~ alone*Control + weekend + personal_time_z + schoolclosure + SITE + (alone|ID) +
+                                ar(time = datetime, gr=id_timepoint), 
+                              cores = 4, seed = 11291993, iter = 4000,
+                              prior = ema_beta_100_prior)
+
+stress_social_context_case_control_no_rslope = brms::brm(data = ema_data, stressed ~ alone*Control + weekend + personal_time_z + schoolclosure + SITE + (1|ID) +
+                                ar(time = datetime, gr=id_timepoint), 
+                              cores = 4, seed = 11291993, iter = 4000,
+                              prior = ema_beta_100_prior)
+
+na_social_context_case_control = brms::brm(data = ema_data, mean_na ~ alone*Control + weekend + personal_time_z + schoolclosure + SITE + (alone|ID) +
+                                ar(time = datetime, gr=id_timepoint), 
+                              cores = 4, seed = 11291993, iter = 4000,
+                              prior = ema_beta_100_prior)
+
+pa_social_context_case_control = brms::brm(data = ema_data, mean_pa ~ alone*Control + weekend + personal_time_z + schoolclosure + SITE + (alone|ID) +
+                                ar(time = datetime, gr=id_timepoint), 
+                              cores = 4, seed = 11291993, iter = 4000,
+                              prior = ema_beta_100_prior)
+
+stress_social_context_case_control_detail = brms::brm(data = ema_data, stressed ~ timeWith_cat3*Control + weekend + personal_time_z + schoolclosure + SITE + (timeWith_cat3|ID) +
+                                ar(time = datetime, gr=id_timepoint), 
+                              cores = 4, seed = 11291993, iter = 4000,
+                              prior = ema_beta_100_prior)
+
+stress_social_context_case_control_detail_no_rslope = brms::brm(data = ema_data, stressed ~ timeWith_cat3*Control + weekend + personal_time_z + schoolclosure + SITE + (1|ID) +
+                                ar(time = datetime, gr=id_timepoint), 
+                              cores = 4, seed = 11291993, iter = 4000,
+                              prior = ema_beta_100_prior)
+
+na_social_context_case_control_detail = brms::brm(data = ema_data, mean_na ~ timeWith_cat3*Control + weekend + personal_time_z + schoolclosure + SITE + (timeWith_cat3|ID) +
+                                ar(time = datetime, gr=id_timepoint), 
+                              cores = 4, seed = 11291993, iter = 4000,
+                              prior = ema_beta_100_prior)
+
+pa_social_context_case_control_detail = brms::brm(data = ema_data, mean_pa ~ timeWith_cat3*Control + weekend + personal_time_z + schoolclosure + SITE + (timeWith_cat3|ID) +
+                                ar(time = datetime, gr=id_timepoint), 
+                              cores = 4, seed = 11291993, iter = 4000,
+                              prior = ema_beta_100_prior)
+
+fixef(pa_social_context_case_control)
+fixef(na_social_context_case_control)
+fixef(stress_social_context_case_control)
+```
+
+# Save model outputs
+
+```{r}
+save(stress_social_context, na_social_context, pa_social_context,
+     stress_social_context_case_control, na_social_context_case_control, pa_social_context_case_control, 
+     stress_social_context_case_control_detail, na_social_context_case_control_detail, pa_social_context_case_control_detail,
+     stress_social_context_case_control_no_rslope, stress_social_context_case_control_detail_no_rslope,
+     file = '../model_outputs/social_context_stress_affect.rda')
+```
+
+
+```{r}
+load('../model_outputs/social_context_stress_affect.rda')
+
+summary(stress_social_context_case_control_no_rslope)
+summary(stress_social_context_case_control)
+summary(stress_social_context_case_control_detail)
+
+
+comparisons = 3
+corected_quantiles = c(0.025 / comparisons, 1 - (.025 / comparisons))
+
+
+summary(stress_social_context_case_control)
+fixef(object = stress_social_context_case_control, probs = corected_quantiles)
+
+```
+
+# Effect sizes
+```{r}
+sigma_stressed = sqrt(mean(c(var(ema_data$stressed[ema_data$timeWith_cat3=='peer'], na.rm = TRUE),
+                           var(ema_data$stressed[ema_data$timeWith_cat3=='family'], na.rm = TRUE),
+                           var(ema_data$stressed[ema_data$timeWith_cat3=='alone'], na.rm = TRUE))))
+stress_effectsize_df = emmeans::emmeans(stress_social_context, specs = 'timeWith_cat3') %>%
+  pairs(reverse=T) %>%
+  as.data.frame() 
+
+stress_effectsize_df = mutate(stress_effectsize_df, d = estimate / sigma_stressed)
+stress_effectsize_df
+```
+
+```{r}
+sigma_na = sqrt(mean(c(var(ema_data$mean_na[ema_data$timeWith_cat3=='peer'], na.rm = TRUE),
+                           var(ema_data$mean_na[ema_data$timeWith_cat3=='family'], na.rm = TRUE),
+                           var(ema_data$mean_na[ema_data$timeWith_cat3=='alone'], na.rm = TRUE))))
+na_effectsize_df = emmeans::emmeans(na_social_context, specs = 'timeWith_cat3') %>%
+  pairs(reverse=T) %>%
+  as.data.frame() 
+
+na_effectsize_df = mutate(na_effectsize_df, d = estimate / sigma_na)
+na_effectsize_df
+
+
+sigma_pa = sqrt(mean(c(var(ema_data$mean_pa[ema_data$timeWith_cat3=='peer'], na.rm = TRUE),
+                           var(ema_data$mean_pa[ema_data$timeWith_cat3=='family'], na.rm = TRUE),
+                           var(ema_data$mean_pa[ema_data$timeWith_cat3=='alone'], na.rm = TRUE))))
+pa_effectsize_df = emmeans::emmeans(pa_social_context, specs = 'timeWith_cat3') %>%
+  pairs(reverse=T) %>%
+  as.data.frame() 
+
+pa_effectsize_df = mutate(pa_effectsize_df, d = estimate / sigma_pa)
+pa_effectsize_df
+```
+
+
+```{r}
+emmeans::emmeans(na_social_context, specs = 'timeWith_cat3') %>%
+  pairs(reverse=T)
+
+
+emmeans::emmeans(pa_social_context, specs = 'timeWith_cat3') %>%
+  pairs(reverse=T)
+
+emmeans::emmeans(stress_social_context, specs = 'timeWith_cat3') %>%
+  pairs(reverse=T)
+```
+
+
+## 1a: plots for main fx
+```{r}
+pred_grid_social_context = expand.grid(timeWith_cat3 = c('family', 'peer', 'alone'),
+                                       weekend = 0,
+                                       schoolclosure = 0,
+                                       personal_time_z = 0, 
+                                       SITE = 'CUIMC')
+
+
+pred_grid_social_context_stress = fitted(stress_social_context, newdata = pred_grid_social_context, re_formula = NA, incl_autocor=FALSE) %>%
+  data.frame() %>%
+  cbind(pred_grid_social_context, .)
+
+pred_grid_social_context_na = fitted(na_social_context, newdata = pred_grid_social_context, re_formula = NA, incl_autocor=FALSE) %>%
+  data.frame() %>%
+  cbind(pred_grid_social_context, .)
+
+pred_grid_social_context_pa = fitted(pa_social_context, newdata = pred_grid_social_context, re_formula = NA, incl_autocor=FALSE) %>%
+  data.frame() %>%
+  cbind(pred_grid_social_context, .)
+
+
+fixef(stress_social_context)
+fixef(na_social_context)
+fixef(pa_social_context)
+
+
+social_context_affect_preds = rbind(pred_grid_social_context_stress %>% mutate(outcome = ' Stress'),
+      pred_grid_social_context_na %>% mutate(outcome = 'Negative\nAffect'),
+      pred_grid_social_context_pa %>% mutate(outcome = 'Positive\nAffect')) %>%
+  mutate(timeWith_cat3 = str_to_title(timeWith_cat3))
+
+social_context_affect_plot = ggplot(social_context_affect_preds, aes(x = timeWith_cat3, y = Estimate, color = timeWith_cat3)) +
+  geom_hline(yintercept = 0, lty =2, alpha = 0.5) +
+  geom_line(aes(group= outcome), color = 'black') +
+  geom_errorbar(aes(ymin = Q2.5, ymax = Q97.5), width = 0.1, lwd = 1) +
+  geom_point(size = 3) +
+  facet_grid(~outcome) +
+  theme_bw() +
+  theme(legend.position = 'none') +
+  scale_color_viridis_d() +
+  scale_x_discrete(limits = c('Family', 'Alone', 'Peer')) +
+  labs(y = 'Difference From\nParticipant Mean',
+       x = NULL,
+       title= '') 
+    
+```
+## 2a: plots for case-control interactions
+
+```{r}
+pred_grid_social_context_case_control = expand.grid(timeWith_cat3 = c('family', 'peer', 'alone'),
+                                       Control = 0:1,
+                                       schoolclosure = 0,
+                                       weekend = 0,
+                                       personal_time_z = 0, 
+                                       SITE = 'CUIMC')
+
+fixef(stress_social_context_case_control_detail)
+pred_grid_social_context_case_control_stress = fitted(stress_social_context_case_control_detail,
+                                                      newdata = pred_grid_social_context_case_control, re_formula = NA, 
+                                                      incl_autocor=FALSE) %>%
+  data.frame() %>%
+  cbind(pred_grid_social_context_case_control, .)
+
+pred_grid_social_context_case_control_na = fitted(na_social_context_case_control_detail, newdata = pred_grid_social_context_case_control, re_formula = NA, incl_autocor=FALSE) %>%
+  data.frame() %>%
+  cbind(pred_grid_social_context_case_control, .)
+
+pred_grid_social_context_case_control_pa = fitted(pa_social_context_case_control_detail, newdata = pred_grid_social_context_case_control, re_formula = NA, incl_autocor=FALSE) %>%
+  data.frame() %>%
+  cbind(pred_grid_social_context_case_control, .)
+
+
+fixef(stress_social_context_case_control)
+fixef(na_social_context_case_control)
+fixef(pa_social_context_case_control)
+
+
+social_context_case_control_affect_preds = rbind(pred_grid_social_context_case_control_stress %>% mutate(outcome = ' Stress'),
+      pred_grid_social_context_case_control_na %>% mutate(outcome = 'Negative\nAffect'),
+      pred_grid_social_context_case_control_pa %>% mutate(outcome = 'Positive\nAffect')) %>%
+  mutate(group = case_when(Control == 0 ~ 'STB', 
+                           Control ==1 ~ 'Psychiatric Control')) %>%
+  mutate(timeWith_cat3 = str_to_title(timeWith_cat3))
+
+
+
+case_control_buffering_plot = ggplot(social_context_case_control_affect_preds, aes(x = timeWith_cat3, y = Estimate, color = group)) +
+  geom_line(aes(group=group), position = position_dodge(0.2), lwd = 1) +
+  geom_errorbar(aes(ymin = Q2.5, ymax = Q97.5), width = 0.1, lwd = 1, position = position_dodge(0.2)) +
+  geom_point(size = 3, position = position_dodge(0.2)) +
+  facet_grid(~outcome) +
+  theme_bw() +
+  labs(y = 'Estimated Average\n + 95% CI',
+       x = NULL,
+       color = NULL, title = '') +
+  scale_x_discrete(limits = c('Family', 'Alone', 'Peer')) +
+  theme(legend.position = 'right', legend.direction = 'vertical')
+      
+```
+
+
+
+
+# Differences among participants with events during study
+
+
+```{r}
+stress_social_context_stb_during_study = brms::brm(data = ema_data, stressed ~ alone*participant_suicide_event1 + weekend + personal_time_z + schoolclosure + SITE + (alone|ID) +
+                                ar(time = datetime, gr=id_timepoint), 
+                              cores = 4, seed = 11291993, iter = 4000,
+                              prior = ema_beta_100_prior)
+
+stress_social_context_stb_during_study_lmer = lmerTest::lmer(data = ema_data, stressed ~ timeWith_cat3*Control + weekend + personal_time_z + schoolclosure + SITE + (1|ID))
+summary(stress_social_context_stb_during_study_lmer)
+
+
+na_social_context_stb_during_study = brms::brm(data = ema_data, mean_na ~ alone*participant_suicide_event1 + weekend + personal_time_z + schoolclosure + SITE + (alone|ID) +
+                                ar(time = datetime, gr=id_timepoint), 
+                              cores = 4, seed = 11291993, iter = 4000,
+                              prior = ema_beta_100_prior)
+
+pa_social_context_stb_during_study = brms::brm(data = ema_data, mean_pa ~ alone*participant_suicide_event1 + weekend + personal_time_z + schoolclosure + SITE + (alone|ID) +
+                                ar(time = datetime, gr=id_timepoint), 
+                              cores = 4, seed = 11291993, iter = 4000,
+                              prior = ema_beta_100_prior)
+
+stress_social_context_stb_during_study_detail = brms::brm(data = ema_data, stressed ~ timeWith_cat3*participant_suicide_event1 + weekend + personal_time_z + schoolclosure + SITE + (timeWith_cat3|ID) +
+                                ar(time = datetime, gr=id_timepoint), 
+                              cores = 4, seed = 11291993, iter = 4000,
+                              prior = ema_beta_100_prior)
+
+na_social_context_stb_during_study_detail = brms::brm(data = ema_data, mean_na ~ timeWith_cat3*participant_suicide_event1 + weekend + personal_time_z + schoolclosure + SITE + (timeWith_cat3|ID) +
+                                ar(time = datetime, gr=id_timepoint), 
+                              cores = 4, seed = 11291993, iter = 4000,
+                              prior = ema_beta_100_prior)
+
+pa_social_context_stb_during_study_detail = brms::brm(data = ema_data, mean_pa ~ timeWith_cat3*participant_suicide_event1 + weekend + personal_time_z + schoolclosure + SITE + (timeWith_cat3|ID) +
+                                ar(time = datetime, gr=id_timepoint), 
+                              cores = 4, seed = 11291993, iter = 4000,
+                              prior = ema_beta_100_prior)
+
+save(stress_social_context_stb_during_study, stress_social_context_stb_during_study_detail,
+     na_social_context_stb_during_study, na_social_context_stb_during_study_detail,
+     pa_social_context_stb_during_study, pa_social_context_stb_during_study_detail,
+     file = '../model_outputs/social_context_stress_affect_participants_stb_during_study.rda')
+```
+
+
+```{r}
+load('../model_outputs/social_context_stress_affect_participants_stb_during_study.rda')
+
+
+fixef(na_social_context_stb_during_study)
+round(fixef(na_social_context_stb_during_study_detail),2)
+
+fixef(pa_social_context_stb_during_study)
+fixef(pa_social_context_stb_during_study_detail)
+
+fixef(stress_social_context_stb_during_study)
+fixef(stress_social_context_stb_during_study_detail)
+
+
+```
+
+## plot for stb during study vs. no stb
+```{r}
+pred_grid_social_context_stb_during_study = expand.grid(timeWith_cat3 = c('family', 'peer', 'alone'),
+                                       participant_suicide_event1 = 0:1,
+                                       schoolclosure = 0,
+                                       weekend = 0,
+                                       personal_time_z = 0, 
+                                       SITE = 'CUIMC')
+
+pred_grid_social_context_stb_during_study_stress = fitted(stress_social_context_stb_during_study_detail,
+                                                      newdata = pred_grid_social_context_stb_during_study, re_formula = NA, 
+                                                      incl_autocor=FALSE) %>%
+  data.frame() %>%
+  cbind(pred_grid_social_context_stb_during_study, .)
+
+pred_grid_social_context_stb_during_study_na = fitted(na_social_context_stb_during_study_detail, newdata = pred_grid_social_context_stb_during_study, re_formula = NA, incl_autocor=FALSE) %>%
+  data.frame() %>%
+  cbind(pred_grid_social_context_stb_during_study, .)
+
+pred_grid_social_context_stb_during_study_pa = fitted(pa_social_context_stb_during_study_detail, newdata = pred_grid_social_context_stb_during_study, re_formula = NA, incl_autocor=FALSE) %>%
+  data.frame() %>%
+  cbind(pred_grid_social_context_stb_during_study, .)
+
+
+social_context_stb_during_study_affect_preds = rbind(pred_grid_social_context_stb_during_study_stress %>% mutate(outcome = ' Stress'),
+      pred_grid_social_context_stb_during_study_na %>% mutate(outcome = 'Negative\nAffect'),
+      pred_grid_social_context_stb_during_study_pa %>% mutate(outcome = 'Positive\nAffect')) %>%
+  mutate(group = case_when(participant_suicide_event1 == 1 ~ '1+ Suicidal Events',
+                           participant_suicide_event1 == 0 ~ 'No Suicidal Events',)) %>%
+  mutate(timeWith_cat3 = str_to_title(timeWith_cat3))
+
+
+
+stb_during_study_buffering_plot = ggplot(social_context_stb_during_study_affect_preds, aes(x = timeWith_cat3, y = Estimate, color = group)) +
+  geom_line(aes(group=group), position = position_dodge(0.2), lwd = 1) +
+  geom_errorbar(aes(ymin = Q2.5, ymax = Q97.5), width = 0, lwd = 1, position = position_dodge(0.2)) +
+  geom_point(size = 3, position = position_dodge(0.2)) +
+  facet_grid(~outcome) +
+  theme_bw() +
+  labs(y = 'Estimated Average\n+ 95% CI',
+       x = 'Social Context (Last 2h)',
+       title = '',
+       color = 'Participants with vs. without suicide events\nduring 6-month study window') +
+  scale_x_discrete(limits = c('Family', 'Alone', 'Peer')) +
+  scale_color_viridis_d(begin = 0.1, end = 0.5) +
+  theme(legend.position = 'right', legend.direction = 'vertical')
+      
+
+ggsave(stb_during_study_buffering_plot, file = '../figures/draft/stb_during_study_buffering.png', height = 5, width = 8)
+```
+
+
+# Make plot grid
+```{r}
+fig2_grid = cowplot::plot_grid(social_context_affect_plot, case_control_buffering_plot, stb_during_study_buffering_plot,
+                   labels = c('A', 'B', 'C'),
+                   label_x = 0, label_y = 1,
+                   nrow = 3, align = 'v', axis = 'lr')
+
+
+
+cowplot::save_plot(fig2_grid, base_width = 9, base_height = 10, filename = '../figures/main/2_social_context_affect_stress.png')
+```
+
+# Individual items
+```{r}
+nested = ema_data %>%
+  pivot_longer(c('angry', 'anxious', 'calm', 'confident', 'happy', 'included', 'lonely', 'rejected', 'sad', 'stressed', 'supported')) %>%
+  group_by(name, ID) %>%
+  mutate(value_scale = scale(value, center =TRUE, scale=FALSE)) %>%
+  ungroup() %>%
+  group_by(name) %>%
+  nest() %>%
+  mutate(model = purrr::map(data, ~lme4::lmer(data =., value_scale ~ timeWith_cat3 + weekend + personal_time_z + schoolclosure + (timeWith_cat3|ID))),
+         estimates = purrr::map(model, ~emmeans::emmeans(., specs = 'timeWith_cat3') %>%
+                                  as.data.frame()))
+
+
+unnnested = nested %>%
+  unnest(estimates) %>%
+  dplyr::select(-model, -data)
+
+single_item_social_context = ggplot(unnnested, aes(x = name, y = emmean, color = timeWith_cat3)) +
+  geom_hline(yintercept = 0, color = 'black', lty = 2) +
+  geom_point(position = position_dodge(0.35), size = 3) +
+  geom_errorbar(aes(ymin = asymp.LCL, ymax = asymp.UCL), width = 0, position = position_dodge(0.35), lwd =1) +
+  theme_bw() + 
+  labs(y = 'Mean Difference From Participant Mean', x = 'Individual EMA Items', color = 'Social Context') +
+  scale_color_viridis_d() +
+  theme(text = element_text(face='bold'))
+
+ggsave(single_item_social_context, file = '../figures/supplement/single_item_social_context.png', height = 4, width = 9)
+
+```

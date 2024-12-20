@@ -1,0 +1,96 @@
+---
+title: "Baseline groups stress"
+author: "Paul A. Bloom"
+date: "2023-07-18"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Time spent alone vs with others {.tabset}
+
+## Setup
+
+```{r}
+library(Matrix)
+library(tidyverse)
+library(lme4)
+library(lmerTest)
+library(sjPlot)
+library(brms)
+load('../cleaned_data/cleaned_data_for_stress_social_context_project_2024-12-16.rda')
+```
+
+# Alone by time
+
+```{r}
+ema_data_for_alone_time_of_day = mutate(ema_data, 
+                                        time_discrete = factor(floor(hour)),
+                                        alone_numeric = as.numeric(as.character(alone))) %>%
+  dplyr::filter(!(hour < 15 & weekend ==0),
+                hour >= 10)
+
+ema_data_for_alone_time_of_day %>%
+  #dplyr::filter(hour >= 10) %>%
+  ggplot(data =., aes(y = alone_numeric, x = time_discrete)) +
+  stat_summary(fun.data = mean_cl_boot) +
+  facet_grid(~dayofweek)
+
+
+alone_time_model = lme4::glmer(data = ema_data_for_alone_time_of_day,
+                               alone ~ time_discrete*weekend + schoolclosure + personal_time + (1|ID), 
+                               family = binomial(link = 'logit'))
+
+summary(alone_time_model)
+
+
+emmeans::emmeans(alone_time_model, specs = ~time_discrete*weekend, type = 'response') %>%
+  data.frame() %>%
+  dplyr::filter(!(weekend==0 & time_discrete %in% c('10', '11', '12', '13', '14'))) %>%
+  dplyr::mutate(weekend = dplyr::recode(weekend, '0'='Weekdays', '1'='Weekend')) %>%
+  ggplot(data = ., aes(x = time_discrete, y = prob)) +
+  geom_point() + 
+  geom_errorbar(aes(ymin = asymp.LCL, ymax = asymp.UCL), width = 0) +
+  facet_grid(~weekend, scales = 'free', drop = TRUE) +
+  labs(y = 'P(Alone)') +
+  theme_bw()
+```
+# Multinomial logistic regression for alone time (time of day / weekend)
+
+```{r}
+alone_time_multinomial = brms::brm(data = ema_data_for_alone_time_of_day,
+                               timeWith_cat3 ~ time_discrete*weekend + schoolclosure + personal_time + (1|ID), 
+                               family = categorical(link = 'logit'), cores = 4)
+
+save(alone_time_multinomial, file = '../model_outputs/alone_time_weekend_model.rda')
+```
+
+
+# Plot from alone time of day / weekend multinomial model
+```{r}
+time_cond_fx = conditional_effects(alone_time_multinomial, categorical = TRUE, conditions = make_conditions(alone_time_multinomial, 'time_discrete'))
+
+time_weekend_social_context_plot = time_cond_fx$`weekend:cats__` %>%
+  mutate(time_recode = gsub(pattern = 'time_discrete = ', replacement = '', x = `cond__`)) %>%
+  dplyr::filter(!(weekend==0 & time_recode < 15)) %>%
+  dplyr::mutate(weekend = dplyr::recode(weekend, '0'='Weekdays', '1'='Weekend')) %>%
+  ggplot(data = ., aes(x = time_recode, y = `estimate__`, color = `cats__`)) +
+  facet_grid(rows = vars(weekend), scales = 'free') +
+  geom_errorbar(aes(ymin = `lower__`, ymax = `upper__`), 
+                width = 0, alpha = 0.5, position = position_dodge(0.2)) +
+  geom_point(position = position_dodge(0.2), size = 2) +
+  geom_line(aes(group = `cats__`), position = position_dodge(0.2)) +
+  theme_bw() +
+  labs(x = 'Time of Day (24-Hour Clock)', y = 'Time in Social Context\nEstimated Proportion', color = 'Social Context') +
+  scale_color_viridis_d() 
+
+ggsave(time_weekend_social_context_plot, file = '../figures/supplement/time_weekend_social_context_plot.png', 
+       height = 4, width = 8)
+```
+
+
+```{r}
+
+```

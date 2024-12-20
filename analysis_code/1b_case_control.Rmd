@@ -1,0 +1,448 @@
+---
+title: "Baseline groups stress"
+author: "Paul A. Bloom"
+date: "2023-07-18"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 0. Setup
+
+```{r}
+library(Matrix)
+library(tidyverse)
+library(lme4)
+library(lmerTest)
+library(sjPlot)
+library(brms)
+library(cowplot)
+library(bayestestR)
+library(EMAtools)
+```
+
+
+```{r}
+load('../cleaned_data/cleaned_data_for_stress_social_context_project_2024-12-16.rda')
+
+
+# recode to have -1=SI/SA, 0=Control for contrasts
+ema_data = mutate(ema_data, Control=-ifelse(GROUP=='Control', 0, 1))
+
+# keep control=1, SI/SA=1 for selfreport data (strain)
+selfreport = mutate(selfreport, Control = ifelse(GROUP == 'Control', 0, 1))
+
+```
+
+
+# 1. Case-control differences in social context: fit multinomial logistic regression for 3-level categorical outcome (peers, fam, alone)
+
+```{r, multinom_case_control_model, message=FALSE}
+# student t prior with 3df, center at 0, scale parameter 10
+beta_prior_logit = c(prior_string("student_t(3, 0, 10)", class = "b"))
+
+multinom_alone_case_control = brms::brm(data = ema_data, timeWith_cat3 ~ Control + SITE + sex + age + 
+                           weekend + timebin +  schoolclosure + personal_time + (1|ID), 
+                           family = categorical(link = 'logit'),
+                           prior = beta_prior_logit, 
+                           cores = 4, seed = 11291993, iter = 4000)
+```
+
+## Case-control differences in affect, stress
+
+```{r, affect_stress_models, message=FALSE}
+# student t prior with 3df, center at 0, scale parameter 100 (for non-scaled EMA outcomes on a 1-100 scale)
+ema_beta_100_prior = c(prior_string("student_t(3, 0, 100)", class = "b"))
+
+stress_case_control = brms::brm(data = ema_data, stressed ~ Control + weekend + personal_time + timebin + 
+                                summerbreak + SITE + sex + age + (1|ID) +
+                                ar(time = datetime, gr=id_timepoint), 
+                              cores = 4, seed = 11291993, iter = 4000, 
+                              prior = ema_beta_100_prior)
+
+na_case_control = brms::brm(data = ema_data, mean_na ~ Control + weekend + personal_time + timebin + 
+                                summerbreak + SITE + sex + age + (1|ID) +
+                                ar(time = datetime, gr=id_timepoint), 
+                              cores = 4, seed = 11291993, iter = 4000,
+                            prior = ema_beta_100_prior)
+
+pa_case_control = brms::brm(data = ema_data, mean_pa ~ Control + weekend + personal_time + timebin + 
+                                summerbreak + SITE + sex + age + (1|ID) +
+                                ar(time = datetime, gr=id_timepoint), 
+                              cores = 4, seed = 11291993, iter = 4000,
+                            prior = ema_beta_100_prior)
+
+
+```
+
+### Print model outputs
+```{r}
+#stres
+fixef(stress_case_control)
+
+#na
+fixef(na_case_control)
+
+#pa
+fixef(pa_case_control)
+
+
+# cohen's d type effect sizes
+# https://imaging.mrc-cbu.cam.ac.uk/statswiki/FAQ/tdunpaired
+sigma_stressed = sqrt(mean(c(var(ema_data$stressed[ema_data$Control==0], na.rm = TRUE),
+                           var(ema_data$stressed[ema_data$Control==-1], na.rm = TRUE))))
+
+sigma_na = sqrt(mean(c(var(ema_data$mean_na[ema_data$Control==0], na.rm = TRUE),
+                     var(ema_data$mean_na[ema_data$Control==-1], na.rm = TRUE))))
+
+
+sigma_pa = sqrt(mean(c(var(ema_data$mean_pa[ema_data$Control==0], na.rm = TRUE),
+                     var(ema_data$mean_pa[ema_data$Control==-1], na = TRUE))))
+
+
+# stress ES
+fixef(stress_case_control)/sigma_stressed
+
+# na ES
+fixef(na_case_control)/sigma_na
+
+# pa ES
+fixef(pa_case_control)/sigma_pa
+
+```
+
+# School closure interaction analyses with group on stress
+```{r, schoolclosuremodels, message=FALSE}
+ema_data = mutate(ema_data, school_closure_3 = case_when(
+  schoolclosure == 1 ~ 'during',
+  schoolclosure == 0 & date < as.Date('2020-06-04') ~ 'before',
+  schoolclosure == 0 & date > as.Date('2021-01-01') ~ 'after',
+))
+
+
+# school closure as binary variable
+stress_case_control_inter_schoolclosure1 = brms::brm(data = ema_data %>% mutate(Control = as.character(Control)), stressed ~ Control*schoolclosure + weekend + personal_time + timebin + 
+                                summerbreak + SITE + sex + age + (schoolclosure|ID), cores = 4, seed = 11291993, iter = 4000, 
+                              prior = ema_beta_100_prior)
+
+# school closure as before/during/after
+stress_case_control_inter_schoolclosure = brms::brm(data = ema_data %>% mutate(Control = as.character(Control)), stressed ~ Control*school_closure_3 + weekend + personal_time + timebin + 
+                                summerbreak + SITE + sex + age + (school_closure_3|ID), cores = 4, seed = 11291993, iter = 4000, 
+                              prior = ema_beta_100_prior)
+
+```
+
+Summarize and plot school closure models
+
+```{r}
+summary(stress_case_control_inter_schoolclosure1)
+summary(stress_case_control_inter_schoolclosure)
+
+sc3_interaction_condfx = conditional_effects(stress_case_control_inter_schoolclosure)
+covid_stress_inter_plot = sc3_interaction_condfx[[10]] %>%
+  mutate(group = ifelse(Control == -1, 'STB', 'Psychiatric Control')) %>%
+  ggplot(data = ., aes(x = school_closure_3, y = estimate__, color = group)) +
+  geom_point(size = 4, position = position_dodge(0.2)) +
+  geom_errorbar(aes(ymin = lower__, ymax = upper__, width = 0), position = position_dodge(0.2), lwd = 1) +
+  theme_bw() +
+  labs(x = 'Timing Relative to Covid-19 School Closure', y = 'Estimated Mean Stress', color = NULL) +
+  scale_x_discrete(limits = c('before', 'during', 'after'))
+
+
+ggsave(covid_stress_inter_plot, file = '../figures/supplement/covid_stress_interaction.png', height = 4, width=6)
+```
+
+
+## Case-control differences in prior adversity exposure
+
+```{r}
+strain_characteristics = c('CIAllCT', 'CIAllTH', 'CDAllCT', 'CDAllTH', 'CHAllCT', 'CHAllTH', 'CEAllCT', 'CEAllTH', 'CRAllCT', 'CRAllTH',
+                           'StressCT', 'StressTH', 'EvntCT', 'DiffCT', 'EvntTH','DiffTH')
+
+selfreport = mutate(selfreport,
+                       # Count
+                       RecDAllCT = RecDDiffCT + RecEvntCT,
+                       RecEAllCT = RecEDiffCT + RecEvntCT,
+                       RecHAllCT = RecHDiffCT + RecEvntCT,
+                       RecLAllCT = RecLDiffCT + RecEvntCT,
+                       RecRAllCT = RecRDiffCT + RecEvntCT,
+                       # Severity
+                       RecDAllTH = RecDDiffTH + RecEvntTH,
+                       RecEAllTH = RecEDiffTH + RecEvntTH,
+                       RecHAllTH = RecHDiffTH + RecEvntTH,
+                       RecLAllTH = RecLDiffTH + RecEvntTH,
+                       RecRAllTH = RecRDiffTH + RecEvntTH
+                       )
+
+strain_characteristics_pastyear = c('RecDAllCT', 'RecEAllCT', 'RecHAllCT', 'RecLAllCT', 'RecRAllCT',
+                                    'RecDAllTH', 'RecEAllTH', 'RecHAllTH', 'RecLAllTH', 'RecRAllTH', 
+                                    'RecTotCT', 'RecTotTH', 'RecEvntCT', 'RecEvntTH', 'RecDiffCT', 'RecDiffTH')
+
+
+case_control_strain_models = selfreport %>%
+    pivot_longer(all_of(c(strain_characteristics, strain_characteristics_pastyear))) %>%
+    group_by(name) %>%
+    mutate(value_scale = scale(value)) %>%
+    nest() %>%
+    mutate(strain_model = purrr::map(data, ~lm(data = ., 
+                                                       value_scale ~ Control + SITE + sex + age)),
+           strain_coef = purrr::map(strain_model, ~broom.mixed::tidy(., conf.int=TRUE)))
+
+case_control_strain_coef = case_control_strain_models %>%
+  unnest(strain_coef) %>%
+  dplyr::select(-data, -strain_model) %>%
+  dplyr::filter(term == 'Control') %>%
+  dplyr::mutate(characteristic = case_when(
+        startsWith(name, 'CI') ~ 'Interpersonal Loss',
+        startsWith(name, 'CD') ~ 'Physical Danger',
+        startsWith(name, 'CH') ~ 'Humiliation',
+        startsWith(name, 'CE') ~ 'Entrapment',
+        startsWith(name, 'CR') ~ 'Role Change/Reversal',
+        startsWith(name, 'Stress') ~ 'Total Stressors',
+        startsWith(name, 'Evnt') ~ 'Total Acute Life Events',
+        startsWith(name, 'Diff') ~ 'Total Chronic Difficulties',
+        name == 'RecDAllTH' ~ 'Physical Danger',
+        name == 'RecEAllTH' ~ 'Entrapment',
+        name == 'RecHAllTH'~ 'Humiliation', 
+        name == 'RecLAllTH' ~ 'Interpersonal Loss',
+        name =='RecRAllTH' ~ 'Role Change/Reversal',
+        name =='RecTotTH' ~ 'Total Stressors',
+        name =='RecEvntTH' ~ 'Total Acute Life Events',
+        name == 'RecDiffTH'~ 'Total Chronic Difficulties'
+    ),
+    strain_timing = ifelse(startsWith(name, 'Rec'), 'Past Year', 'Lifetime'),
+    strain_type = case_when(
+        endsWith(name, 'TH') ~ 'Severity',
+         endsWith(name, 'CT') ~ 'Count'),
+    strain_total = case_when(
+      grepl('Total', characteristic) ~ 'Total Summaries',
+      !grepl('Total', characteristic) ~ 'Core Social-Psych\nCharacteristics'
+    ))
+```
+
+## Save all models
+```{r}
+save(multinom_alone_case_control, stress_case_control, na_case_control, pa_case_control, 
+     case_control_strain_models, case_control_strain_coef,
+     file = '../model_outputs/case_control_models.rda')
+
+```
+
+# 2. Plot case-control differences!
+```{r}
+load('../model_outputs/case_control_models.rda')
+```
+
+## Social Context Plot / Stats from Multinomial Logistic Regression Model
+```{r}
+summary(multinom_alone_case_control)
+
+# fixef
+fixef(multinom_alone_case_control)
+```
+
+```{r}
+# prediction grid for social context
+pred_grid_case_control = expand.grid(Control = -1:0, 
+                                     weekend = 0, 
+                                     personal_time = mean(ema_data$personal_time, na.rm = TRUE), 
+                                     summerbreak = 0,
+                                     schoolclosure = 0,
+                          SITE = 'CUIMC', sex= 'F', age = mean(ema_data$age, na.rm=TRUE), timebin = '1morning')
+
+```
+
+Stats for social context contrasts
+```{r}
+# convert probability to odds
+probability_to_odds = function(probability){
+  return(probability / (1-probability))
+}
+
+# using the prediction grid, get fitted predictions for each condition, then manually calculate contrasts
+multinom_cond_fx_draws = fitted(multinom_alone_case_control, newdata = pred_grid_case_control, 
+                                re_formula = NA, incl_autocor=TRUE, summary = FALSE, scale = 'response', categorical=TRUE) %>%
+  as.data.frame() %>%
+  mutate(diff_alone = `2.alone` - `1.alone`,
+         diff_family = `2.family` - `1.family`,
+         diff_peer = `2.peer` - `1.peer`,
+         or_alone = probability_to_odds(`2.alone`) / probability_to_odds(`1.alone`),
+         or_family = probability_to_odds(`2.family`) / probability_to_odds(`1.family`),
+         or_peer = probability_to_odds(`2.peer`) / probability_to_odds(`1.peer`)) 
+
+# 95% HDI for contrasts
+multinom_cond_fx_draws %>%
+  bayestestR::hdi(ci=0.95) %>%
+  as.data.frame()
+
+# means for contrasts
+multinom_cond_fx_draws %>%
+  colMeans() %>%
+  as.data.frame() 
+```
+
+
+```{r}
+# extract conditional (marginal) probabilities for PC vs. SI/SA
+multinom_cond_fx = conditional_effects(multinom_alone_case_control, categorical=TRUE, scale='response', robust = FALSE, 
+                                       re_formula = NA, method = 'fitted')
+
+multinom_predictions = multinom_cond_fx$`Control:cats__` %>%
+    dplyr::filter(Control %in% c(0,-1)) %>%
+  mutate(group = dplyr::recode(Control, '0'='Psychiatric Controls', '-1'='STB'))
+
+# participant-level summaries of raw data (for spaghetti)
+timewith_raw_summary = ema_data %>%
+  dplyr::filter(!is.na(Control)) %>%
+  group_by(ID, Control, PCTalone, PCTpeer, PCTfamily) %>%
+  count() %>%
+  pivot_longer(contains('PCT')) %>%
+  mutate(`cats__`=gsub('PCT', '', name)) %>%
+  dplyr::select(ID, Control, `cats__`, `estimate__`=value) %>%
+  mutate(group = dplyr::recode(Control, '0'='Psychiatric Controls', '-1'='STB'))
+
+
+# plot
+case_control_alone_plt = ggplot(multinom_predictions, aes(x = `cats__`, y = `estimate__`, color = group)) +
+    geom_line(data = timewith_raw_summary, aes(group = ID),  alpha = 0.1) +
+    geom_point(position = position_dodge(0.1), size = 3) +
+    geom_errorbar(aes(ymin = `lower__`, ymax = `upper__`), width = 0.1, position = position_dodge(0.1), lwd = 1) +
+    geom_line(aes(group = group), position = position_dodge(0.1), lwd = 1) +
+    labs(y = '% of Responses', x = 'Social Context in Last 2h', color = 'Group',
+         title = 'Case-Control Differences: Social Context') +
+    theme_bw()
+
+``` 
+
+## Stress & Affect Plot
+
+```{r}
+pred_grid_case_control = expand.grid(Control = 0:1, weekend = 0, personal_time = 0, summerbreak = 0,
+                          SITE = 'PITT', sex= 'M', age = 15, timebin = '3late_afternoon')
+
+pred_grid_case_control_stress = fitted(stress_case_control, newdata = pred_grid_case_control, re_formula = NA, incl_autocor=FALSE) %>%
+  data.frame() %>%
+  cbind(pred_grid_case_control, .)
+
+
+case_control_stress_affect_plt = rbind(broom.mixed::tidy(stress_case_control) %>% mutate(outcome = 'Stress'),
+      broom.mixed::tidy(na_case_control) %>% mutate(outcome = 'Negative Affect'),
+      broom.mixed::tidy(pa_case_control) %>% mutate(outcome = 'Positive Affect')) %>%
+  dplyr::filter(term == 'Control') %>%
+  ggplot(data = ., aes(x = outcome, y = estimate)) +
+  geom_point(size = 3) +
+  geom_hline(yintercept = 0, lty = 2) + 
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0, lwd = 1) +
+  labs(y = 'Mean Difference (0-100 Scale)\nSTB+ > Psychiatric Controls', x = NULL,
+       title = 'Case-Control Differences\nMomentary Stress & Affect') +
+  theme_bw() +
+  coord_flip()
+      
+```
+
+
+## Strain variables plot
+```{r}
+case_control_strain_plot = case_control_strain_coef %>% dplyr::filter(strain_type == 'Severity') %>%
+  ggplot(data = ., aes(x = characteristic, y = estimate, color = strain_timing)) +
+  geom_point(position = position_dodge(0.3), size = 3) +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0, 
+                position = position_dodge(0.3),
+                lwd = 1) +
+  theme_bw() +
+  coord_flip() +
+  facet_grid(rows = vars(strain_total), scales = 'free_y') +
+  geom_hline(yintercept = 0, lty = 2) +
+  labs(color = 'Metric', x = NULL, y = 'Standardized Mean Difference\nSTB+ > Psychiatric Controls',
+       title = 'Case-Control Differences:\nPrior Stress & Adversity Exposure Severity') +
+  scale_color_manual(values = c('black', 'red4'))
+```
+
+
+## Example Data Plot
+```{r}
+example_data_plot = dplyr::filter(ema_data, ID=='1101', Day<=7) %>%
+  group_by(Day) %>%
+  mutate(min_x = ifelse((Timedif > 120 | is.na(Timedif)), hour - 2, hour - (Timedif/60))) %>%
+  ungroup() %>%
+  pivot_longer(c('mean_pa', 'mean_na', 'stressed')) %>%
+  mutate(day = dplyr::recode(Day, '1'='Mon', '2'='Sat', '3'='Sun', '4'='Thurs', '5'='Fri', '6'='Tues', '7'='Wed'),
+         name = dplyr::recode(name, 'stressed'='Stress', 'mean_pa'='Positive\nAffect', 'mean_na'='Negative\nAffect'),
+         day =  factor(day, levels = c('Mon', 'Tues', 'Wed', 'Thurs', 'Fri', 'Sat', 'Sun'))) %>%
+  group_by(name) %>%
+  mutate(min_y = min(value),
+         max_y = max(value)) %>%
+  ungroup() %>%
+  ggplot(aes(x = hour, y = value)) +
+  facet_grid(rows = vars(name), cols = vars(day), scales = 'free_y', switch = 'both') +
+  geom_rect(aes(fill = timeWith_cat3, ymin = min_y, ymax = max_y, xmin = min_x, xmax = hour), alpha = 0.5) +
+  geom_point() + 
+  geom_line() +
+  theme_bw() +
+  theme(panel.spacing = unit(0, 'cm'),
+        panel.grid.minor = element_blank(),
+        legend.position = 'top') +
+  labs(x = 'Hour (24 Hour Clock)', y = NULL, title = 'Example Experience Sampling Data', fill = 'Social Context in Last 2h') +
+  scale_fill_viridis_d() 
+
+
+```
+
+## Put together grid of plots
+
+```{r}
+case_control_plot = cowplot::plot_grid(example_data_plot, case_control_alone_plt,
+                   labels = c('A', 'B'))
+
+
+cowplot::save_plot(case_control_plot, filename = '../figures/main/1_case_control_plot.png', base_width = 10, base_height = 4.25)
+```
+
+
+# Differences in individual ema items
+
+```{r}
+# separate models for each item
+nested = ema_data %>%
+  pivot_longer(c('angry', 'anxious', 'calm', 'confident', 'happy', 'included', 'lonely', 'rejected', 'sad', 'stressed', 'supported')) %>%
+  group_by(name, ID) %>%
+  ungroup() %>%
+  group_by(name) %>%
+  nest() %>%
+  mutate(model = purrr::map(data, ~lme4::lmer(data =., value ~ Control + weekend + personal_time + timebin + 
+                                summerbreak + SITE + sex + age + (1|ID))),
+         estimates = purrr::map(model, ~emmeans::emmeans(., specs = 'Control') %>%
+                                  as.data.frame()),
+         stats = purrr::map(model, ~emmeans::emmeans(., specs = 'Control') %>%
+                              pairs(adjust=FALSE) %>%
+                                  as.data.frame()))
+
+unnnested = nested %>%
+  unnest(estimates) %>%
+  dplyr::select(-model, -data, -stats) %>%
+  mutate(Control = ifelse(Control =='-1', 'STB', 'Psychiatric Control'))
+
+unnnested_stats = nested %>%
+  unnest(stats) %>%
+  dplyr::select(-model, -data, -estimates) %>%
+  mutate(., sig = p.value<.05)
+
+
+unnnested = left_join(unnnested, unnnested_stats %>% dplyr::select(name, sig), by = 'name') %>%
+  mutate(sig = ifelse(sig==TRUE & Control == 'STB', '*', ''))
+
+single_item_case_control = ggplot(unnnested, aes(x = name, y = emmean)) +
+  geom_point(position = position_dodge(0.35), size = 3, aes(color = Control)) +
+  geom_errorbar(aes(ymin = asymp.LCL, ymax = asymp.UCL, color = Control), width = 0, position = position_dodge(0.35), lwd =1) +
+  theme_bw() + 
+  labs(y = 'Estimated Group Means', x = 'Individual EMA Items', color = 'Group') +
+  theme(text = element_text(face='bold')) +
+  scale_color_manual(values = c('#F8766D', '#619CFF')) +
+  geom_text(aes(label=sig), size = 14)
+
+ggsave(single_item_case_control, file = '../figures/supplement/single_item_case_control.png', height = 4, width = 9)
+
+
+```
